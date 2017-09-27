@@ -10,92 +10,61 @@
 
 #include <service_if.h>
 #include <lib_log.h>
+#include "route.h"
+#include "dbproxy.h"
+#include "wait_db.h"
 
-class db_service_t
+//服务数据	
+struct service_t
 {
-public:
-	db_service_t()
-	{
+	std::string ip;
+	uint16_t port;
+	el::lib_tcp_peer_info_t* peer;
+	service_t(){
+		this->init();
+	}
+	void init(){
 		this->peer = NULL;
+		this->ip.clear();
+		this->port = 0;
 	}
+	int send(el::lib_tcp_peer_info_t* back_peer, const void* data, uint32_t len){
+		if (NULL == this->peer){
+			//连接
+			this->peer = el_async::connect(this->ip, this->port);
+			if (NULL == this->peer){
+				return el::ERR_DBPROXY::DB_DISCONNECT;
+			}
+		}
+		if (1 == g_dbproxy.head.cmd%2){
+			//创建新KEY&&保存
+			uint32_t key = g_wait_db.gen_save_key(g_dbproxy.head, back_peer);
 
-	db_service_t( const db_service_t& cr )
-	{
-		this->name = cr.name;
-		this->peer = cr.peer;
+			//修改头&&发送
+			key = EL_BYTE_SWAP(key);
+			::memcpy((char*)data + 4, &key, sizeof(key));
+			//TRACE_LOG("=>s[seq:%u]", key);
+		}
+		el_async::s2peer(this->peer, data, len);
+
+		return 0;
 	}
-	virtual ~db_service_t(){}
-	std::string name;
-	el::lib_tcp_peer_info_t* peer;	
-protected:
-	
-private:
-
-	db_service_t& operator=(const db_service_t& cr);
-
 };
 
+//服务数据管理器	
 class service_mgr_t
 {
 public:
-	static service_mgr_t& instance(){
-		static service_mgr_t s;
-		return s;
+	service_mgr_t(){
+		this->start = 0;
+		this->end = 0;
 	}
-	virtual ~service_mgr_t(){}
-	int add( const std::string name, el::lib_tcp_peer_info_t* peer )
-	{
-		auto it = this->service_map.find(peer->get_fd());
-		if (this->service_map.end() != it){
-			ERROR_LOG("service already exist[fd:%u, name:%s]", peer->get_fd(), name.c_str());
-			return -1;
-		}
-
-		auto it_name = this->service_name_map.find(name);
-		if (this->service_name_map.end() != it_name){
-			ERROR_LOG("service already exist[fd:%u, name:%s]", peer->get_fd(), name.c_str());
-			return -1;
-		}
-		db_service_t info;
-		std::string s;
-		s = name;
-		info.name = name;
-		info.peer = peer;
-		this->service_map.insert(std::make_pair(peer->get_fd(), info));
-		this->service_name_map.insert(std::make_pair(name, info));
-		return 0;
+	uint32_t start;
+	uint32_t end;
+	int send(el::lib_tcp_peer_info_t* back_peer, USER_ID route_id, const void* data, uint32_t len){
+		uint32_t s_cnt = this->service_vec.size();
+		uint32_t idx = route_id%s_cnt;
+		return this->service_vec[idx].send(back_peer, data, len);
 	}
-	int remove( int fd )
-	{
-		auto it = this->service_map.find(fd);
-		if (this->service_map.end() == it){
-			ERROR_LOG("service inexist[fd:%u]", fd);
-			return -1;
-		}
-		std::string name = it->second.name;
-
-		this->service_map.erase(fd);
-		this->service_name_map.erase(name);
-
-		return 0;
-	}
-	inline db_service_t* get_service(const std::string& name){
-		auto it = this->service_name_map.find(name);
-		if (this->service_name_map.end() != it){
-			return &it->second;
-		}
-		return NULL;
-	}
-	
-protected:
-	service_mgr_t(){}
-private:
-	service_mgr_t(const service_mgr_t& cr);
-	service_mgr_t& operator=(const service_mgr_t& cr);
-	typedef std::map<int, db_service_t> SERVICE_MAP;//key:fd, val:服务信息
-	SERVICE_MAP service_map;
-	typedef std::map<std::string, db_service_t> SERVICE_NAME_MAP;
-	SERVICE_NAME_MAP service_name_map;
+	std::vector<service_t> service_vec;
 };
-
-#define g_service_mgr service_mgr_t::instance()

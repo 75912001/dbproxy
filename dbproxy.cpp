@@ -1,109 +1,80 @@
 #include <lib_proto/lib_msgbuf.h>
 #include <lib_log.h>
 #include <lib_err_code.h>
-
+#include <lib_platform.h>
 #include "dbproxy.h"
 #include "route.h"
 #include "db_service.h"
 #include "wait_db.h"
+#include <lib_include.h>
 
 dbproxy_t g_dbproxy;
-server_send_data_t send_cli_buf;
+server_send_data_t g_send_cli_buf;
 
-int send_ret(proto_head_t& head, el::lib_tcp_peer_info_t* peer_fd_info, uint32_t ret)
+int g_send_ret(proto_head_t& head, el::lib_tcp_peer_info_t* peer_fd_info, uint32_t ret)
 {
-    //cmdå‘½ä»¤æ²¡æœ‰å®šä¹‰
-    ERROR_LOG("[cmd:%#x, id:%u, ret:%u]", head.cmd, head.id, ret);
+    //cmdÃüÁîÃ»ÓÐ¶¨Òå
+	WARN_LOG("[cmd:%#x, ret:%u]", head.cmd, ret);
+
     proto_head_t err_out = head;
 
-    send_cli_buf.set_head(&err_out);
+    g_send_cli_buf.set_head(&err_out);
 
-    return el_async::s2peer(peer_fd_info, (void*)send_cli_buf.data(), send_cli_buf.len());
+    return el_async::s2peer(peer_fd_info, (void*)g_send_cli_buf.data(), g_send_cli_buf.len());
 }	
-
 
 int dbproxy_t::handle_cli( const void* data, uint32_t len, el::lib_tcp_peer_info_t* peer_fd_info )
 {
-	/* è¿”å›žéžé›¶ï¼Œæ–­å¼€FDçš„è¿žæŽ¥ */
-    proto_head_t head;
-    head.unpack(data);
+	/* ·µ»Ø·ÇÁã£¬¶Ï¿ªFDµÄÁ¬½Ó */
+    this->head.unpack(data);
 
+//     TRACE_LOG("c=>[body_len:%u, cmd:%#x, seq:%u, ret:%u, uid:%" PRIu64 ", fd:%d, pkglen:%u]",
+//             this->head.length, this->head.cmd, this->head.seq,
+// 			this->head.result, this->head.id, peer_fd_info->fd, len);
 
-    TRACE_LOG("c=>[body_len:%u, cmd:%#x, seq:%u, ret:%u, uid:%u, fd:%d, pkglen:%u]",
-            head.length, head.cmd, head.seq, head.result, head.id, peer_fd_info->get_fd(), len);
-
-    uint32_t db_type = 0;
-    const route_db_t* route_db = g_rotue_t.find_dbser(head.cmd, head.id, db_type);
-    if (NULL != route_db)
-    {
-        db_service_t* db_service = g_service_mgr.get_service(route_db->name);
-        if (NULL == db_service)
-        {
-            //è¿žæŽ¥
-            el::lib_tcp_peer_info_t* peer = el_async::connect(route_db->ip, route_db->port);
-            if (NULL != peer)
-            {
-                if (0 != g_service_mgr.add(route_db->name, peer))
-                {
-                    return send_ret(head, peer_fd_info, el::ERR_DBPROXY::DB_CONNECT_ADD);
-                }
-            } else {
-                return send_ret(head, peer_fd_info, el::ERR_DBPROXY::DB_DISCONNECT);
-            }
-        }
-        db_service = g_service_mgr.get_service(route_db->name);
-        if (NULL != db_service){
-            //åˆ›å»ºæ–°KEY&&ä¿å­˜
-            uint32_t key = g_wait_db.gen_save_key(head, peer_fd_info);
-            if (0 == key){
-                return send_ret(head, peer_fd_info, el::ERR_DBPROXY::GEN_PROTO_KEY);
-            }
-
-            //ä¿®æ”¹å¤´&&å‘é€
-            key = EL_BYTE_SWAP(key);
-
-            ::memcpy((char*)data + 4, &key, sizeof(key));
-            TRACE_LOG("=>s[seq:%u]", key);
-            el_async::s2peer(db_service->peer, data, len);
-        }
-    } else {
-        return send_ret(head, peer_fd_info, el::ERR_SYS::UNDEFINED_CMD);
-    }
-
+    service_mgr_t* service_mgr = g_rotue_t.find(head.cmd);
+	if (NULL == service_mgr){
+		return g_send_ret(this->head, peer_fd_info, el::ERR_SYS::UNDEFINED_CMD);
+	}
+	this->ret = service_mgr->send(peer_fd_info, this->head.id, data, len);
+	if (0 != this->ret){
+		g_send_ret(head, peer_fd_info, this->ret);
+	}
 	return 0;
 }
 
 int dbproxy_t::handle_srv( const void* data, uint32_t len, el::lib_tcp_peer_info_t* peer_fd_info )
 {
-    proto_head_t head;
-    head.unpack(data);
+    this->head.unpack(data);
 
-
-    TRACE_LOG("s=>[body_len:%u, cmd:%#x, seq:%u, ret:%u, uid:%u, fd:%d, pkglen:%u]",
-            head.length, head.cmd, head.seq, head.result, head.id, peer_fd_info->get_fd(), len);
+//     TRACE_LOG("s=>[body_len:%u, cmd:%#x, seq:%u, ret:%u, uid:%" PRIu64 ", fd:%d, pkglen:%u]",
+//             this->head.length, this->head.cmd, this->head.seq, 
+// 			this->head.result, this->head.id, peer_fd_info->fd, len);
 
 #ifdef ENABLE_TRACE_LOG
-    std::string outbuf;
-    el::bin2hex(outbuf, (char*)data, len);
-    TRACE_LOG("s=>[len:%u, %s]", len, outbuf.c_str());
+//     std::string outbuf;
+//     el::bin2hex(outbuf, (char*)data, len);
+//     TRACE_LOG("s=>[len:%u, %s]", len, outbuf.c_str());
 #endif
 
-	//å¤„ç†DBçš„è¿”å›žåŒ…
-    cli_info_t ci;
-    if (!g_wait_db.get_old_seq(head.seq, ci))
-    {
-        ERROR_LOG("seq can not find [cmd:%#x, id:%u, seq:%u]", head.cmd, head.id, head.seq);
+	//´¦ÀíDBµÄ·µ»Ø°ü
+	cli_info_t cli_info;
+    if (!g_wait_db.get_old_seq(head.seq, cli_info)){
+        ERROR_LOG("seq can not find [cmd:%#x, seq:%u]", head.cmd, head.seq);
         return 0;
-    } 
-    else 
-    {
-        ci.head.seq = EL_BYTE_SWAP(ci.head.seq);
+    } else {
+        cli_info.head.seq = EL_BYTE_SWAP(cli_info.head.seq);
 
-        ::memcpy((char*)data + 4, &ci.head.seq, sizeof(ci.head.seq));
-        TRACE_LOG("=>c[seq:%u]", ci.head.seq);
-        el_async::s2peer(ci.peer_info, data, len);		
+        ::memcpy((char*)data + 4, &cli_info.head.seq, sizeof(cli_info.head.seq));
+       // TRACE_LOG("=>c[seq:%u]", cli_info.head.seq);
+        el_async::s2peer(cli_info.peer_info, data, len);		
     }
 	
 	return 0;
+}
+
+dbproxy_t::dbproxy_t()
+{
+	this->ret = 0;
 }
 

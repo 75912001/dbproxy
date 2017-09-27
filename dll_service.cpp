@@ -14,9 +14,7 @@
 #include "wait_db.h"
 #include "dbproxy.h"
 
-//todo 添加重载配置文件功能
-//todo 优化定位 消息/DB 效率
-// todo 添加限制发送消息请求的IP
+wait_db_t g_wait_db;
 
 extern "C" int on_init()
 {
@@ -31,11 +29,10 @@ extern "C" int on_init()
 		if (!time_out_sec.empty()){
 			uint32_t time_out = 0;
 			el::convert_from_string(time_out, time_out_sec);
-			g_wait_db.set_time_out_sec(time_out);
+			g_wait_db.time_out_sec = time_out;
 		}
 		g_dbproxy_timer = new dbproxy_timer_t;
 		g_dbproxy_timer->add_sec_event(dbproxy_timer_t::clear, NULL, el_async::get_now_sec() + 1);
-
 	}
 	return 0;
 }
@@ -62,30 +59,21 @@ extern "C" void on_events()
 extern "C" int on_get_pkg_len(el::lib_tcp_peer_info_t* peer_fd_info,
         const void* data, uint32_t len)
 {
-    if (len < proto_head_t::PROTO_HEAD_LEN)
-    {
+    if (len < proto_head_t::PROTO_HEAD_LEN){
         return 0;
     }
 
-    server_recv_data_t in(data);
+	char* c = (char*)data;
+	PROTO_LEN pkg_len = EL_BYTE_SWAP((PROTO_LEN)(*(PROTO_LEN*)c));
 
-    uint32_t pkg_len = in.get_len();
-
-    TRACE_LOG("[fd:%d, len:%d, pkg_len:%u]", peer_fd_info->get_fd(), len, pkg_len);
-
-    if (pkg_len < proto_head_t::PROTO_HEAD_LEN || pkg_len >= g_bench_conf->get_page_size_max())
-    {
-        ERROR_LOG("pkg len error |%u", pkg_len);
+    if (pkg_len < proto_head_t::PROTO_HEAD_LEN || pkg_len >= g_bench_conf->page_size_max){
+        CRIT_LOG("pkg len error |%u", pkg_len);
         return el::ERR_SYS::DISCONNECT_PEER;
     }
 
-    TRACE_LOG("[len:%u, %u]", len, pkg_len);
-
-    if (len < pkg_len)
-    {
+    if (len < pkg_len){
         return 0;
     }
-
 
 	return pkg_len;
 }
@@ -105,27 +93,40 @@ extern "C" void on_srv_pkg(const void* data, uint32_t len, el::lib_tcp_peer_info
 
 extern "C" void on_cli_conn(el::lib_tcp_peer_info_t* peer_fd_info)
 {
-    TRACE_LOG("[fd:%d]", peer_fd_info->get_fd());
+    DEBUG_LOG("[fd:%d]", peer_fd_info->fd);
 }
 
 
 extern "C" void on_cli_conn_closed(int fd)
 {
-	INFO_LOG("[fd:%d]", fd);
+	CRIT_LOG("[fd:%d]", fd);
 	g_wait_db.clear_cli_info(fd);
 }
 
 extern "C" void on_svr_conn_closed(int fd)
 {
-	INFO_LOG("[fd:%d]", fd);
-	g_service_mgr.remove(fd);
+	CRIT_LOG("[fd:%d]", fd);
+	FOREACH(g_rotue_t.service_mgr_vec, it){
+		service_mgr_t& sm = *it;
+		FOREACH(sm.service_vec, it_2){
+			service_t& s = *it_2;
+			if (NULL == s.peer){
+				continue;
+			}
+			
+			if (s.peer->fd == fd){
+				s.peer = NULL;
+				break;
+			}
+		}
+	}
 }
 
 extern "C" void	on_mcast_pkg(const void* data, int len)
 {
 }
 
-extern "C"  void on_addr_mcast_pkg(uint32_t id, const char* name, const char* ip, uint16_t port, int flag)
+extern "C"  void on_addr_mcast_pkg(uint32_t id, const char* name, const char* ip, uint16_t port, const char* data, int flag)
 {
     //INFO_LOG("id:%u, name:%s, ip:%s, port:%u, flag:%u", id, name, ip, port, flag);
 }
@@ -135,7 +136,5 @@ extern "C" void on_udp_pkg(int fd, const void* data, int len ,struct sockaddr_in
 }
 
 extern "C" void on_svr_conn(int fd){    
-    INFO_LOG("[fd:%d]", fd);
+    DEBUG_LOG("[fd:%d]", fd);
 }
-
-
